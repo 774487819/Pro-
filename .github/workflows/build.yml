@@ -27,6 +27,7 @@ jobs:
         run: |
           flutter create --platforms=android -a kotlin --org com.proplayer --project-name pro_player app_build
           cd app_build
+          rm -rf test
           flutter pub add 'media_kit:^1.1.11' 'media_kit_video:^1.2.5' 'media_kit_libs_video:^1.0.5' 'file_picker:^8.0.0' 'shared_preferences:^2.2.3' 'http:^1.2.1'
 
       - name: Configure Android (minSdk + Internet permission)
@@ -484,9 +485,10 @@ jobs:
             void _enhanceSheet() => _sheet(ListView(shrinkWrap: true, children: [
                   const ListTile(title: Text('تحسين جودة الفيديو بالذكاء الاصطناعي', style: TextStyle(fontWeight: FontWeight.bold))),
                   for (final e in Enhancer.presets.entries)
-                    RadioListTile<String>(
-                      value: e.key, groupValue: enh, title: Text(e.value['label']),
-                      onChanged: (v) { Navigator.pop(context); _setEnh(v!); },
+                    ListTile(
+                      leading: Icon(enh == e.key ? Icons.radio_button_checked : Icons.radio_button_off, color: enh == e.key ? const Color(0xFF3E91FF) : Colors.white54),
+                      title: Text(e.value['label']),
+                      onTap: () { Navigator.pop(context); _setEnh(e.key); },
                     ),
                 ]));
 
