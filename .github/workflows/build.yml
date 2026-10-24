@@ -30,15 +30,16 @@ jobs:
           rm -rf test
           flutter pub add 'media_kit:^1.1.11' 'media_kit_video:^1.2.5' 'media_kit_libs_video:^1.0.5' 'file_picker:^8.0.0' 'shared_preferences:^2.2.3' 'http:^1.2.1'
 
-      - name: Configure Android (minSdk + Internet permission)
+      - name: Configure Android (minSdk, Internet, compileSdk fix)
         run: |
           cd app_build/android/app
           sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 21/; s/minSdkVersion flutter.minSdkVersion/minSdkVersion 21/' build.gradle* || true
           sed -i 's#<application#<uses-permission android:name="android.permission.INTERNET"/>\n    <application#' src/main/AndroidManifest.xml
 
-
-          # ---- قبول تراخيص SDK + إيقاف lint المانع ----
+          # قبول تراخيص أندرويد SDK
           yes | flutter doctor --android-licenses > /dev/null 2>&1 || true
+
+          # إيقاف lint المانع
           if [ -f build.gradle.kts ]; then
             cat >> build.gradle.kts << 'GEOF'
 
@@ -60,6 +61,19 @@ jobs:
           }
           GEOF
           fi
+
+          # الحل الجذري: سكربت Gradle عام يرفع compileSdk لكل الوحدات (التطبيق + كل المكتبات)
+          mkdir -p $HOME/.gradle/init.d
+          cat > $HOME/.gradle/init.d/compilesdk.gradle << 'GEOF'
+          allprojects {
+              afterEvaluate { p ->
+                  if (p.plugins.hasPlugin('com.android.application') || p.plugins.hasPlugin('com.android.library')) {
+                      def sdk = (System.getenv('COMPILE_SDK') ?: '36') as Integer
+                      p.android.compileSdk = sdk
+                  }
+              }
+          }
+          GEOF
 
       - name: Write App Code (lib/main.dart)
         run: |
@@ -707,34 +721,31 @@ jobs:
           }
           EOF
 
-      - name: Check Dart Code (shows errors fast)
+      - name: Check Dart Code
         run: |
           cd app_build
           flutter analyze --no-fatal-infos --no-fatal-warnings
 
-      - name: Build Release APK (auto-fixes compileSdk)
+      - name: Build Release APK
         run: |
           set -o pipefail
           cd app_build
+          CUR=36
           for i in 1 2 3; do
+            export COMPILE_SDK=$CUR
+            echo "android.suppressUnsupportedCompileSdk=$CUR" >> android/gradle.properties
+            echo ">>> محاولة $i بـ compileSdk=$CUR"
             if flutter build apk --release --split-per-abi \
                  --dart-define=PROXY_URL=${{ secrets.PROXY_URL }} \
                  --dart-define=APP_TOKEN=${{ secrets.APP_TOKEN }} 2>&1 | tee build.log; then
               exit 0
             fi
+            echo "=================== ملخص الخطأ (محاولة $i) ==================="
+            grep -n -B1 -A12 "What went wrong" build.log | head -45
             N=$(grep -oE "compile against version [0-9]+" build.log | grep -oE "[0-9]+" | sort -n | tail -1)
-            if [ -z "$N" ]; then exit 1; fi
-            echo ">>> رفع compileSdk إلى $N وإعادة المحاولة ($i)"
-            sed -i -E "s/^([[:space:]]*)compileSdk(Version)?[[:space:]]*=?[[:space:]]*.*/\1compileSdk = $N/" android/app/build.gradle*
-            echo "android.suppressUnsupportedCompileSdk=$N" >> android/gradle.properties
+            if [ -n "$N" ] && [ "$N" -gt "$CUR" ]; then CUR=$N; else break; fi
           done
           exit 1
-
-      - name: Show Build Errors (only if failed)
-        if: failure()
-        run: |
-          cd app_build
-          grep -n -B2 -A14 "What went wrong" build.log || tail -n 60 build.log || true
 
       - name: Upload Ready APK
         uses: actions/upload-artifact@v4
