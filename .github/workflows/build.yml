@@ -36,26 +36,9 @@ jobs:
           sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 21/; s/minSdkVersion flutter.minSdkVersion/minSdkVersion 21/' build.gradle* || true
           sed -i 's#<application#<uses-permission android:name="android.permission.INTERNET"/>\n    <application#' src/main/AndroidManifest.xml
 
-          # ---- إصلاح خطأ compileSdk (المكتبات تطلب SDK أحدث من قالب Flutter) ----
-          cd ..
-          if [ -f build.gradle.kts ]; then
-            cat >> build.gradle.kts << 'GEOF'
 
-          subprojects {
-              tasks.configureEach {
-                  if (name.contains("AarMetadata")) { enabled = false }
-              }
-          }
-          GEOF
-          else
-            cat >> build.gradle << 'GEOF'
-
-          subprojects {
-              tasks.configureEach { t -> if (t.name.contains("AarMetadata")) { t.enabled = false } }
-          }
-          GEOF
-          fi
-          cd app
+          # ---- قبول تراخيص SDK + إيقاف lint المانع ----
+          yes | flutter doctor --android-licenses > /dev/null 2>&1 || true
           if [ -f build.gradle.kts ]; then
             cat >> build.gradle.kts << 'GEOF'
 
@@ -729,13 +712,23 @@ jobs:
           cd app_build
           flutter analyze --no-fatal-infos --no-fatal-warnings
 
-      - name: Build Release APK
+      - name: Build Release APK (auto-fixes compileSdk)
         run: |
           set -o pipefail
           cd app_build
-          flutter build apk --release --split-per-abi \
-            --dart-define=PROXY_URL=${{ secrets.PROXY_URL }} \
-            --dart-define=APP_TOKEN=${{ secrets.APP_TOKEN }} 2>&1 | tee build.log
+          for i in 1 2 3; do
+            if flutter build apk --release --split-per-abi \
+                 --dart-define=PROXY_URL=${{ secrets.PROXY_URL }} \
+                 --dart-define=APP_TOKEN=${{ secrets.APP_TOKEN }} 2>&1 | tee build.log; then
+              exit 0
+            fi
+            N=$(grep -oE "compile against version [0-9]+" build.log | grep -oE "[0-9]+" | sort -n | tail -1)
+            if [ -z "$N" ]; then exit 1; fi
+            echo ">>> رفع compileSdk إلى $N وإعادة المحاولة ($i)"
+            sed -i -E "s/^([[:space:]]*)compileSdk(Version)?[[:space:]]*=?[[:space:]]*.*/\1compileSdk = $N/" android/app/build.gradle*
+            echo "android.suppressUnsupportedCompileSdk=$N" >> android/gradle.properties
+          done
+          exit 1
 
       - name: Show Build Errors (only if failed)
         if: failure()
