@@ -27,7 +27,7 @@ jobs:
         run: |
           flutter create --platforms=android -a kotlin --org com.proplayer --project-name pro_player app_build
           cd app_build
-          flutter pub add media_kit media_kit_video media_kit_libs_video file_picker shared_preferences http
+          flutter pub add 'media_kit:^1.1.11' 'media_kit_video:^1.2.5' 'media_kit_libs_video:^1.0.5' 'file_picker:^8.0.0' 'shared_preferences:^2.2.3' 'http:^1.2.1'
 
       - name: Configure Android (minSdk + Internet permission)
         run: |
@@ -169,6 +169,8 @@ jobs:
             Timer? _toastT;
             final ai = AiService();
             final chat = <Map<String, String>>[];
+            List<Cue>? _cues;
+            bool _translating = false;
 
             @override
             void initState() {
@@ -268,6 +270,9 @@ jobs:
                 case 'enhance_custom':
                   await _setEnh('auto', custom: Map<String, dynamic>.from(v)..putIfAbsent('vf', () => ''));
                   break;
+                case 'translate_subs': await _translateFlow('$v'); break;
+                case 'subs_off': await _subsOff(); break;
+                case 'subs_on': await _subsOn(); break;
                 case 'fit': setState(() => fit = {'cover': BoxFit.cover, 'fill': BoxFit.fill}[v] ?? BoxFit.contain); break;
               }
             }
@@ -307,7 +312,7 @@ jobs:
                       await (player.platform as NativePlayer).setProperty('brightness', '$bright');
                       _toast('السطوع $bright');
                     } else {
-                      vol = (vol + delta).clamp(0, 100);
+                      vol = (vol + delta).clamp(0.0, 100.0).toDouble();
                       player.setVolume(vol);
                       _toast('الصوت ${vol.round()}%');
                     }
@@ -329,6 +334,11 @@ jobs:
                           onPressed: _enhanceSheet,
                           icon: Icon(Icons.auto_awesome, color: enh == 'off' ? Colors.white : const Color(0xFFFFD54F)),
                           label: Text(enh == 'off' ? 'تحسين' : 'AI', style: TextStyle(color: enh == 'off' ? Colors.white : const Color(0xFFFFD54F))),
+                        ),
+                        IconButton(
+                          icon: Icon(Icons.translate, color: _translating ? const Color(0xFFFFD54F) : Colors.white),
+                          tooltip: 'ترجمة',
+                          onPressed: _translateSheet,
                         ),
                         IconButton(icon: const Icon(Icons.smart_toy_outlined), tooltip: 'المساعد', onPressed: _assistant),
                         IconButton(icon: const Icon(Icons.more_vert), onPressed: _moreSheet),
@@ -387,6 +397,86 @@ jobs:
                     ),
                   ]),
                 );
+
+            // ---------- الترجمة بالذكاء الاصطناعي ----------
+            static const _langs = ['العربية', 'English', 'Español', 'Français', 'Deutsch', 'Türkçe', 'Русский', '中文', '日本語', '한국어', 'हिन्दी', 'Português', 'Italiano', 'فارسی', 'اردو', 'Bahasa Indonesia'];
+
+            Future<void> _subsOff() async {
+              await player.setSubtitleTrack(SubtitleTrack.no());
+              _toast('تم إخفاء الترجمة');
+            }
+
+            Future<void> _subsOn() async {
+              await player.setSubtitleTrack(SubtitleTrack.auto());
+              _toast('تم إظهار الترجمة');
+            }
+
+            Future<bool> _pickSubs() async {
+              final r = await FilePicker.platform.pickFiles(type: FileType.custom, allowedExtensions: ['srt', 'vtt'], withData: true);
+              final bytes = r?.files.single.bytes;
+              if (bytes == null) return false;
+              final cues = parseSubs(utf8.decode(bytes, allowMalformed: true));
+              if (cues.isEmpty) {
+                _toast('الملف لا يحتوي ترجمة صالحة');
+                return false;
+              }
+              _cues = cues;
+              return true;
+            }
+
+            Future<void> _translateFlow(String lang) async {
+              if (_translating) return;
+              if (_cues == null && !await _pickSubs()) return;
+              final cues = _cues!;
+              setState(() => _translating = true);
+              try {
+                final out = <String>[];
+                const chunk = 60;
+                for (var i = 0; i < cues.length; i += chunk) {
+                  final end = i + chunk > cues.length ? cues.length : i + chunk;
+                  out.addAll(await ai.translate(cues.sublist(i, end).map((c) => c.text).toList(), lang));
+                  _toast('جاري الترجمة ${out.length}/${cues.length}');
+                }
+                await player.setSubtitleTrack(SubtitleTrack.data(buildSrt(cues, out), title: 'AI $lang', language: lang));
+                _toast('تمت الترجمة إلى $lang ✅');
+              } catch (e) {
+                final msg = e.toString().replaceAll('Exception: ', '');
+                _toast('تعذّرت الترجمة: $msg');
+              }
+              if (mounted) setState(() => _translating = false);
+            }
+
+            void _translateSheet() {
+              final lc = TextEditingController();
+              _sheet(Padding(
+                padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+                child: ListView(shrinkWrap: true, padding: const EdgeInsets.all(14), children: [
+                  const Text('الترجمة بالذكاء الاصطناعي', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                  const SizedBox(height: 4),
+                  Text(_cues == null ? 'اختر لغة ثم ملف الترجمة (SRT / VTT) وسيُترجم لها' : 'تم تحميل ${_cues!.length} سطر، اختر اللغة الهدف',
+                      style: const TextStyle(color: Colors.white60, fontSize: 12)),
+                  const SizedBox(height: 10),
+                  Wrap(spacing: 6, runSpacing: 6, children: [
+                    for (final l in _langs) ActionChip(label: Text(l), onPressed: () { Navigator.pop(context); _translateFlow(l); }),
+                  ]),
+                  const SizedBox(height: 10),
+                  TextField(
+                    controller: lc,
+                    decoration: const InputDecoration(hintText: 'أو اكتب أي لغة أخرى ثم Enter', border: OutlineInputBorder()),
+                    onSubmitted: (v) { if (v.trim().isNotEmpty) { Navigator.pop(context); _translateFlow(v.trim()); } },
+                  ),
+                  const Divider(),
+                  ListTile(leading: const Icon(Icons.upload_file), title: const Text('اختيار ملف ترجمة آخر'), onTap: () async {
+                    Navigator.pop(context);
+                    final old = _cues;
+                    _cues = null;
+                    if (await _pickSubs()) { _translateSheet(); } else { _cues = old; }
+                  }),
+                  ListTile(leading: const Icon(Icons.subtitles_off_outlined), title: const Text('إزالة / إخفاء الترجمة'), onTap: () { Navigator.pop(context); _subsOff(); }),
+                  ListTile(leading: const Icon(Icons.subtitles_outlined), title: const Text('إظهار الترجمة الأصلية'), onTap: () { Navigator.pop(context); _subsOn(); }),
+                ]),
+              ));
+            }
 
             // ---------- Sheets ----------
             void _sheet(Widget child) => showModalBottomSheet(context: context, backgroundColor: const Color(0xFF151922), isScrollControlled: true, builder: (_) => SafeArea(child: child));
@@ -530,8 +620,70 @@ jobs:
               final t = (d['content'][0]['text'] as String).replaceAll(RegExp(r'```json|```'), '').trim();
               return jsonDecode(t) as Map<String, dynamic>;
             }
+
+            /// ترجمة أسطر الترجمة إلى أي لغة (عبر الخادم الوسيط)
+            Future<List<String>> translate(List<String> lines, String lang) async {
+              for (var attempt = 0; attempt < 2; attempt++) {
+                final r = await http.post(
+                  Uri.parse(proxyUrl),
+                  headers: {'content-type': 'application/json', 'x-app-token': appToken},
+                  body: jsonEncode({'mode': 'translate', 'lang': lang, 'lines': lines}),
+                );
+                final d = jsonDecode(utf8.decode(r.bodyBytes));
+                if (r.statusCode != 200) throw Exception(d['error']?['message'] ?? 'خطأ في الاتصال');
+                try {
+                  final t = (d['content'][0]['text'] as String).replaceAll(RegExp(r'```json|```'), '').trim();
+                  final out = (jsonDecode(t) as List).map((e) => '$e').toList();
+                  if (out.length == lines.length) return out;
+                } catch (_) {}
+              }
+              throw Exception('فشلت الترجمة، حاول مرة أخرى');
+            }
+          }
+
+          // ===== معالجة ملفات الترجمة SRT / VTT =====
+          class Cue {
+            final String start, end, text;
+            Cue(this.start, this.end, this.text);
+          }
+
+          String _normTime(String s) {
+            s = s.trim().split(' ').first.replaceAll('.', ',');
+            if (RegExp(r'^\d{1,2}:\d{2},').hasMatch(s)) s = '00:$s';
+            return s;
+          }
+
+          List<Cue> parseSubs(String raw) {
+            raw = raw.replaceAll('\r\n', '\n').replaceAll('\uFEFF', '');
+            final cues = <Cue>[];
+            for (final block in raw.split(RegExp(r'\n\s*\n'))) {
+              final lines = block.trim().split('\n');
+              final i = lines.indexWhere((l) => l.contains('-->'));
+              if (i < 0) continue;
+              final t = lines[i].split('-->');
+              final text = lines.sublist(i + 1).join('\n').trim();
+              if (text.isEmpty || t.length < 2) continue;
+              cues.add(Cue(_normTime(t[0]), _normTime(t[1]), text));
+            }
+            return cues;
+          }
+
+          String buildSrt(List<Cue> cues, List<String> texts) {
+            final b = StringBuffer();
+            for (var i = 0; i < cues.length; i++) {
+              b.writeln(i + 1);
+              b.writeln('${cues[i].start} --> ${cues[i].end}');
+              b.writeln(texts[i].trim());
+              b.writeln();
+            }
+            return b.toString();
           }
           EOF
+
+      - name: Check Dart Code (shows errors fast)
+        run: |
+          cd app_build
+          flutter analyze --no-fatal-infos --no-fatal-warnings
 
       - name: Build Release APK
         run: |
